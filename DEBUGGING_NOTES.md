@@ -1,14 +1,14 @@
 # DEBUGGING_NOTES.md
 **Project:** Secure Registration Automation  
-**Context:** Python + Browser-based automation of a Cloudflare-protected registration flow  
-**Objective:** Document all issues encountered during development, how to reproduce them, their root causes, and their final resolutions.
+**Context:** Python + Playwright automation of a Cloudflare- and integrity-protected registration flow  
+**Objective:** Document all bugs and issues encountered during development, including reproduction steps, root causes, and final resolutions.
 
 ---
 
 ## 1. HTTP 405 — Method Not Allowed
 
 ### Symptoms
-Requests to certain endpoints returned:
+Requests returned:
 ```
 405 Method Not Allowed
 ```
@@ -17,140 +17,78 @@ Requests to certain endpoints returned:
 ```http
 POST /
 POST /handshake
-POST /api/status
 POST /api/v1/integrity/config
 POST /api/v1/integrity/verify
 ```
 
 ### Root Cause
-These endpoints are either:
-- Not designed to accept POST requests, or
-- Internal backend routes not exposed to client-side code.
+These routes are either:
+- Not intended for POST, or
+- Internal backend routes not exposed to the frontend.
 
 ### Resolution
-Restrict all client calls to **only the endpoints actually used by the frontend**:
+Only call endpoints actually triggered by frontend JavaScript:
 - `POST /api/v1/integrity/handshake`
 - `POST /api/v1/complete_registration`
 
-All other integrity-related routes are server-internal and must not be called.
-
 ---
 
-## 2. “Flag Not Found” Errors
-
-### Symptoms
-Script executed without crashing but failed with:
-```
-Flag not found in response
-```
-
-### Root Cause
-The `flag` is returned **only** by the final registration endpoint upon successful completion.
-
-### Resolution
-Search for the flag **only** in the response from:
-```
-POST /api/v1/complete_registration
-```
-
----
-
-## 3. Runtime Errors (Undefined Variables)
-
-### Symptoms
-```
-NameError: name 'all_responses' is not defined
-```
-
-### Root Cause
-Debug variables were referenced outside their valid scope.
-
-### Resolution
-Remove unused debug variables or ensure all variables are defined before use.
-
----
-
-## 4. HTTP 403 — Forbidden
+## 2. HTTP 403 — Forbidden (Cloudflare Blocking)
 
 ### Symptoms
 ```
 403 Client Error: Forbidden
 ```
 
+### How to Reproduce
+- Call protected endpoints using `requests` or curl.
+
 ### Root Cause
-The endpoint is protected by Cloudflare Bot Management and browser-bound integrity checks.
+Cloudflare Bot Management blocks non-browser clients that do not execute JavaScript.
 
 ### Resolution
-Execute the flow inside a **real browser environment** using Playwright.
+Use Playwright to run a real Chromium browser so Cloudflare JS challenges can complete.
 
 ---
 
-## 5. Incorrect Credential Proof Calculation
+## 3. HTTP 400 — Bad Request (Payload & Heuristics)
 
-### Root Cause
-Frontend computes:
+### Symptoms
 ```
-MD5(username + email + password)
+400 Client Error: Bad Request
 ```
 
-### Resolution
-Compute credential proof exactly as:
+### How to Reproduce
+- Submit registration with incorrect hashes, unrealistic mouse data, or replayed headers.
+
+### Root Causes
+- Incorrect credential_proof calculation
+- Unrealistic mouse movement
+- Over-randomized credentials
+- Reusing identical headers across requests
+- Manually setting Accept-Encoding
+
+### Resolutions
+- Compute `credential_proof = MD5(username + email + password)`
+- Use realistic mouse movement (6+ points, small deltas, ms timing)
+- Use realistic static credentials
+- Let the HTTP client manage compression
+- Avoid header replay patterns
+
+---
+
+## 4. Cloudflare Timing Issues
+
+### Symptoms
+Requests fail despite cookies being present.
+
+### How to Reproduce
 ```python
-credential_proof = md5(username + email + password)
+page.goto(url, wait_until="networkidle")
 ```
 
----
-
-## 6. Missing or Implicit Payload Fields
-
 ### Root Cause
-Backend performs strict schema validation; some fields are injected by frontend JavaScript.
-
-### Resolution
-Ensure payload structure matches frontend output exactly.
-
----
-
-## 7. Mouse Data Validation Failures
-
-### Root Cause
-Backend validates human-like mouse interaction patterns.
-
-### Resolution
-Generate mouse data with:
-- ≥ 6 points
-- Small diagonal movement
-- 5–15 ms timestamp gaps
-- Realistic screen coordinates
-
----
-
-## 8. Anti-Replay Detection via Headers
-
-### Root Cause
-Backend detects identical request contexts across integrity boundaries.
-
-### Resolution
-Use separate header dictionaries for:
-- Integrity handshake
-- Registration submission
-
----
-
-## 9. Accept-Encoding / Compression Issues
-
-### Root Cause
-`requests` does not natively support Brotli (`br`).
-
-### Resolution
-Do not manually set `Accept-Encoding`.
-
----
-
-## 10. Playwright Timing and Cloudflare Finalization
-
-### Root Cause
-`networkidle` fires before Cloudflare completes JS-based behavioral scoring.
+Cloudflare behavioral scoring completes after network idle.
 
 ### Resolution
 Use:
@@ -161,27 +99,146 @@ time.sleep(5)
 
 ---
 
-## 11. Browser vs Raw HTTP Execution Context
+## 5. Handshake Token Not Found
+
+### Symptoms
+```
+RuntimeError: final_token not returned from handshake
+```
+
+### How to Reproduce
+- Assume handshake response always returns `final_token`.
 
 ### Root Cause
-Final registration endpoint is browser-execution-context bound.
+Handshake response schema varies:
+```json
+{ "final_token": "..." }
+{ "token": "..." }
+{ "data": { "token": "..." } }
+```
 
 ### Resolution
-Submit the final request **inside Playwright** using:
+Extract token robustly:
 ```python
-page.request.post(...)
+token = data.get("final_token") or data.get("token") or data.get("data", {}).get("token")
 ```
 
 ---
 
-## Final Conclusion
+## 6. Flag Not Found in Response
 
-The system enforces multiple protection layers:
+### Symptoms
+```
+RuntimeError: Flag not found in response
+```
+
+### How to Reproduce
+- Assume flag is always at top-level JSON.
+
+### Root Cause
+Backend may wrap response:
+```json
+{ "flag": "..." }
+{ "data": { "flag": "..." } }
+```
+
+### Resolution
+Extract flag defensively:
+```python
+flag = res.get("flag") or res.get("data", {}).get("flag")
+```
+
+---
+
+## 7. Incomplete Integrity Flow
+
+### Symptoms
+```json
+{ "detail": "Incomplete flow" }
+```
+
+### How to Reproduce
+- Call `/api/v1/complete_registration` directly after handshake.
+- Manually replay integrity endpoints using fetch.
+
+### Root Cause
+Integrity system is a **stateful frontend-driven FSM**.
+Calling endpoints directly does not advance internal JS state.
+
+### Resolution
+Do NOT manually call integrity endpoints.
+Instead:
+- Fill the registration form
+- Click the submit button
+- Let frontend JavaScript execute the full integrity lifecycle naturally
+
+---
+
+## 8. Playwright Request API vs Browser Fetch
+
+### Symptoms
+Handshake succeeds but token missing or flow rejected.
+
+### How to Reproduce
+```python
+page.request.post(...)
+```
+
+### Root Cause
+`page.request` bypasses page JS execution context.
+
+### Resolution
+Use `fetch()` via:
+```python
+page.evaluate(async () => fetch(...))
+```
+or rely entirely on frontend-triggered requests.
+
+---
+
+## 9. Raw HTTP vs Browser Execution Context
+
+### Symptoms
+Persistent 400 errors even with correct cookies, headers, and payload.
+
+### Root Cause
+Final registration endpoint is **browser-execution-context bound**.
+It validates that requests originate from frontend JS.
+
+### Resolution
+Perform final submission only via:
+- Real form interaction (fill + click)
+- Or frontend-triggered fetch/XHR
+
+---
+
+## 10. Final Architectural Insight (Key Lesson)
+
+The system enforces multiple layers:
 - Cloudflare Bot Management
 - JavaScript integrity checks
 - Behavioral validation
 - Schema validation
 - Anti-replay detection
-- Browser execution binding
+- Browser execution context binding
 
-The correct engineering approach is to reverse-engineer the frontend request contract and execute the final submission inside a real browser context.
+Attempting to replay or shortcut these layers is unreliable.
+
+### Correct Engineering Approach
+- Reverse-engineer frontend behavior
+- Let frontend JavaScript drive the flow
+- Use Playwright for real browser interaction
+- Intercept results instead of replaying requests
+
+---
+
+## Final Conclusion
+
+The only stable and correct solution is a **form-driven Playwright script** that:
+- Loads the site
+- Fills the form
+- Clicks submit
+- Intercepts `/api/v1/complete_registration`
+- Extracts and prints the flag
+
+This mirrors real-world automation under modern web security and reflects production-grade engineering practice.
