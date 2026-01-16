@@ -1,0 +1,9 @@
+# Project Dependencies
+# Registration Portal Automation
+
+# HTTP library for making API requests
+requests>=2.31.0
+
+# Browser automation library for Cloudflare bypass
+# Note: After installing, run 'playwright install' to download browser binaries
+playwright>=1.40.0
