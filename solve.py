@@ -1,78 +1,104 @@
-import time
-import hashlib
+#!/usr/bin/env python3
+"""
+Registration automation script using Playwright.
+Lets the frontend JavaScript handle all integrity checks and form submission.
+"""
+
 from playwright.sync_api import sync_playwright
 
 BASE_URL = "http://51.195.24.179:8000"
 
-
-def md5(value: str) -> str:
-    return hashlib.md5(value.encode("utf-8")).hexdigest()
+# Static credentials
+USERNAME = "Gehrman88098"
+EMAIL = "kmichaelson190@gmail.com"
+PASSWORD = "harsh1mudit2"
 
 
 def main():
     with sync_playwright() as p:
-        # Launch real browser
         browser = p.chromium.launch(headless=False)
         context = browser.new_context()
         page = context.new_page()
 
-        # 1. Load site and allow Cloudflare + JS integrity to finish
-        page.goto(BASE_URL)
-        time.sleep(5)
+        # 1. Navigate to base URL and allow all frontend JavaScript to load
+        page.goto(BASE_URL, wait_until="networkidle")
+        page.wait_for_load_state("domcontentloaded")
 
-        # 2. Integrity handshake (MUST be inside browser context)
-        handshake_resp = page.request.post(
-            f"{BASE_URL}/api/v1/integrity/handshake",
-            headers={"Content-Type": "application/json"},
-            data="{}"
-        )
+        # 2. Wait for form fields to be visible and fill them
+        # Wait for at least one input field to appear
+        page.wait_for_selector('input', timeout=10000)
 
-        handshake_data = handshake_resp.json()
-        final_token = handshake_data.get("final_token")
+        # Fill username field - try multiple selectors
+        username_filled = False
+        for selector in ['input[name="username"]', 'input[type="text"]', 'input[placeholder*="username" i]', 'input[id*="username" i]', 'input:first-of-type']:
+            try:
+                if page.locator(selector).count() > 0:
+                    page.fill(selector, USERNAME)
+                    username_filled = True
+                    break
+            except Exception:
+                continue
 
-        if not final_token:
-            raise RuntimeError("final_token not returned from handshake")
+        # Fill email field
+        email_filled = False
+        for selector in ['input[type="email"]', 'input[name="email"]', 'input[placeholder*="email" i]', 'input[id*="email" i]']:
+            try:
+                if page.locator(selector).count() > 0:
+                    page.fill(selector, EMAIL)
+                    email_filled = True
+                    break
+            except Exception:
+                continue
 
-        # 3. Build browser-faithful payload
-        username = "Gehrman88098"
-        email = "kmichaelson190@gmail.com"
-        password = "harsh1mudit2"
+        # Fill password field
+        password_filled = False
+        for selector in ['input[type="password"]', 'input[name="password"]', 'input[placeholder*="password" i]', 'input[id*="password" i]']:
+            try:
+                if page.locator(selector).count() > 0:
+                    page.fill(selector, PASSWORD)
+                    password_filled = True
+                    break
+            except Exception:
+                continue
 
-        now = int(time.time() * 1000)
-        mouse_data = [
-            {"x": 854, "y": 0,  "t": now},
-            {"x": 845, "y": 10, "t": now + 6},
-            {"x": 832, "y": 22, "t": now + 12},
-            {"x": 820, "y": 35, "t": now + 19},
-            {"x": 810, "y": 48, "t": now + 27},
-            {"x": 800, "y": 62, "t": now + 36},
-        ]
+        # 3. Set up response listener and click the "Register Securely" button
+        # Wait for the registration response using Playwright's built-in mechanism
+        with page.expect_response(lambda response: response.url.endswith('/api/v1/complete_registration'), timeout=30000) as response_info:
+            # Click the submit button - let frontend JavaScript handle everything
+            button_clicked = False
+            for selector in [
+                'button:has-text("Register Securely")',
+                'button:has-text("Register")',
+                'button[type="submit"]',
+                'input[type="submit"]',
+                'form button',
+                'button'
+            ]:
+                try:
+                    if page.locator(selector).count() > 0:
+                        page.click(selector)
+                        button_clicked = True
+                        break
+                except Exception:
+                    continue
 
-        payload = {
-            "username": username,
-            "email": email,
-            "password": password,  # plaintext required
-            "email_hash": md5(email),
-            "password_hash": md5(password),
-            "credential_proof": md5(username + email + password),
-            "final_token": final_token,
-            "mouse_data": mouse_data,
-        }
+            if not button_clicked:
+                raise RuntimeError("Could not find or click the registration button")
 
-        # 4. Complete registration INSIDE browser context
-        registration_resp = page.request.post(
-            f"{BASE_URL}/api/v1/complete_registration",
-            json=payload
-        )
+        # 4. Extract flag from the response
+        # The frontend JavaScript has:
+        # - Computed hashes
+        # - Run integrity stages
+        # - Submitted the request
+        response = response_info.value
+        response_json = response.json()
+        flag = response_json.get("flag") or response_json.get("data", {}).get("flag")
 
-        result = registration_resp.json()
+        if not flag:
+            raise RuntimeError(f"Flag not found in registration response: {response_json}")
 
-        # 5. Print flag
-        if "flag" not in result:
-            raise RuntimeError("Flag not found in response")
-
-        print(result["flag"])
-
+        # 5. Print ONLY the flag to stdout
+        print(flag)
         browser.close()
 
 
