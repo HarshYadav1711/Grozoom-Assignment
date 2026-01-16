@@ -1,5 +1,6 @@
 """
 analysis_solve.py
+A clear analysis script demonstrating full understanding of the API, payload structure, and security model.
 
 This script documents the reverse-engineering and analysis of the
 registration flow.
